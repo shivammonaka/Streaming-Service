@@ -67,7 +67,7 @@ pub async fn upload(
     Json(UploadResponse {
         video_id: video.id.to_string(),
         slug: slug.clone(),
-        share_url: format!("http://localhost:3000/v/{}", slug),
+        share_url: format!("http://localhost:5173/v/{}", slug),
     })
 }
 
