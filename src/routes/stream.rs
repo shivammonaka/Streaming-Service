@@ -28,7 +28,7 @@ pub async fn get_video(
     Json(VideoResponse {
         status: format!("{:?}", video.status),
         manifest_url: video.hls_path
-            .map(|p| format!("http://localhost:3000/{}", p)),
+            .map(|p| state.storage.public_url(&p)),
     })
 }
 

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use nanoid::nanoid;
 use crate::AppState;
 use crate::db;
-
+use crate::services::transcode;
 #[derive(Serialize)]
 pub struct UploadResponse {
     pub video_id: String,
@@ -42,17 +42,28 @@ pub async fn upload(
     let slug = nanoid!(8);
 
     // 3. save file to disk
-    let _saved_path = state.storage
+    let saved_path = state.storage
         .save_file(&filename, file_data)
         .await
         .unwrap();
 
     // 4. save to database
-    let video = db::videos::create(&state.db, &slug, &_saved_path)
+    let video = db::videos::create(&state.db, &slug, &saved_path)
         .await
         .unwrap();
 
-    // 5. return response
+    // 5. get output path for HLS chunks
+    let hls_path = state.storage.hls_output_path(&slug);
+
+    // 6. trigger ffmpeg in background (dont wait for it)
+    let db_pool = state.db.clone();
+    let video_id = video.id;
+    let saved_path_clone = saved_path.clone();
+    tokio::spawn(async move {
+        transcode::run(video_id, &saved_path_clone, &hls_path, &db_pool).await;
+    });
+
+    // 7. return response immediately, dont wait for ffmpeg
     Json(UploadResponse {
         video_id: video.id.to_string(),
         slug: slug.clone(),
