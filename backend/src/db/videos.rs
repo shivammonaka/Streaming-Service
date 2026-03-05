@@ -1,64 +1,75 @@
 use crate::models::video::{Video, VideoStatus};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-// INSERT a new video row — called when upload starts
-pub async fn create(pool: &PgPool, slug: &str, original_path: &str) -> Result<Video> {
+/// Insert a new video record when upload begins.
+pub async fn create(
+    pool: &PgPool,
+    slug: &str,
+    original_path: &str,
+    size_bytes: i64,
+    mime_type: &str,
+) -> Result<Video> {
     let video = sqlx::query_as!(
         Video,
         r#"
-        INSERT INTO videos (slug, status, original_path)
-        VALUES ($1, 'Pending', $2)
-        RETURNING id, slug, status as "status: VideoStatus", 
-                  original_path, hls_path, created_at
+        INSERT INTO videos (slug, status, original_path, size_bytes, mime_type)
+        VALUES ($1, 'Pending', $2, $3, $4)
+        RETURNING id, slug, status as "status: VideoStatus",
+                  original_path, hls_path, size_bytes, mime_type, created_at
         "#,
         slug,
-        original_path
+        original_path,
+        size_bytes,
+        mime_type,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .context("Failed to insert video record")?;
 
     Ok(video)
 }
 
-// SELECT by slug — called when someone opens the share link
+/// Fetch a video by its public slug.
 pub async fn get_by_slug(pool: &PgPool, slug: &str) -> Result<Video> {
     let video = sqlx::query_as!(
         Video,
         r#"
         SELECT id, slug, status as "status: VideoStatus",
-               original_path, hls_path, created_at
+               original_path, hls_path, size_bytes, mime_type, created_at
         FROM videos
         WHERE slug = $1
         "#,
         slug
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .context(format!("Video not found with slug: {}", slug))?;
 
     Ok(video)
 }
 
-// SELECT by id — called when polling status
+/// Fetch a video by its internal UUID.
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Video> {
     let video = sqlx::query_as!(
         Video,
         r#"
         SELECT id, slug, status as "status: VideoStatus",
-               original_path, hls_path, created_at
+               original_path, hls_path, size_bytes, mime_type, created_at
         FROM videos
         WHERE id = $1
         "#,
         id
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .context(format!("Video not found with id: {}", id))?;
 
     Ok(video)
 }
 
-// UPDATE status — called by ffmpeg when done
+/// Update video status and optionally set the HLS manifest path.
 pub async fn update_status(
     pool: &PgPool,
     id: Uuid,
@@ -76,7 +87,8 @@ pub async fn update_status(
         id
     )
     .execute(pool)
-    .await?;
+    .await
+    .context(format!("Failed to update status for video: {}", id))?;
 
     Ok(())
 }

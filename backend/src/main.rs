@@ -11,8 +11,6 @@ mod storage;
 mod routes;
 mod services;
 
-// AppState is passed into every route handler
-// like Spring's ApplicationContext
 #[derive(Clone)]
 pub struct AppState {
     pub db: sqlx::PgPool,
@@ -21,48 +19,59 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // initialize logging first so we can see all logs
+    tracing_subscriber::fmt::init();
+
     // load .env file
     dotenv().ok();
 
-    // connect to database
+    // read config from environment
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set in .env");
+    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./storage".to_string());
+    let max_connections = env::var("MAX_DB_CONNECTIONS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse::<u32>()
+        .expect("MAX_DB_CONNECTIONS must be a number");
 
+    // connect to database
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_connections)
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
 
-    println!("✅ Connected to database");
+    tracing::info!("Connected to database");
 
-    // set up local storage
-    let storage = storage::local::LocalStorage {
-        base_path: "./storage".to_string(),
-    };
+    // set up storage backend
+    // swap LocalStorage for S3Storage here when moving to production
+    let storage = storage::local::LocalStorage::new(
+    &storage_path,
+    &format!("http://localhost:{}", port),
+);
 
-    // build app state
     let state = AppState {
         db: pool,
         storage: Arc::new(storage),
     };
 
-    // set up routes
     let app = Router::new()
         .route("/api/videos", post(routes::videos::upload))
         .route("/api/videos/:id/status", get(routes::videos::status))
         .route("/v/:slug", get(routes::stream::get_video))
         .route("/videos/:slug/*file", get(routes::stream::serve_file))
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive()) // TODO: restrict to frontend URL in production
         .with_state(state);
 
-    // start server
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+    let bind_addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .unwrap();
+        .expect(&format!("Failed to bind to {}", bind_addr));
 
-    println!("🚀 Server running on http://localhost:3000");
+    tracing::info!("Server running on http://localhost:{}", port);
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await
+        .expect("Server crashed unexpectedly");
 }

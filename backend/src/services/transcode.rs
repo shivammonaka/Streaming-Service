@@ -6,62 +6,74 @@ use uuid::Uuid;
 use crate::db;
 use crate::models::video::VideoStatus;
 
+/// Runs the full transcoding pipeline for a video.
+/// Updates DB status throughout the process.
+/// This runs as a background tokio task — errors are logged, not propagated.
 pub async fn run(
     video_id: Uuid,
     input_path: &str,
     output_dir: &str,
     pool: &PgPool,
 ) {
-    // update status to Processing
-    db::videos::update_status(pool, video_id, VideoStatus::Processing, None)
-        .await
-        .unwrap();
+    // mark as processing
+    if let Err(e) = db::videos::update_status(pool, video_id, VideoStatus::Processing, None).await {
+        tracing::error!("Failed to set Processing status for {}: {}", video_id, e);
+        return;
+    }
 
-    println!("🎬 Starting transcoding for video: {}", video_id);
+    tracing::info!("Starting transcoding for video: {}", video_id);
 
     match transcode(input_path, output_dir).await {
         Ok(_) => {
-            // ffmpeg succeeded, update status to Ready
             let hls_path = format!("{}/index.m3u8", output_dir);
-            println!("✅ Transcoding complete: {}", hls_path);
+            tracing::info!("Transcoding complete: {}", hls_path);
 
-            db::videos::update_status(
+            // delete raw upload to save disk space
+            if let Err(e) = fs::remove_file(input_path).await {
+                tracing::warn!("Failed to delete raw upload {}: {}", input_path, e);
+            }
+
+            if let Err(e) = db::videos::update_status(
                 pool,
                 video_id,
                 VideoStatus::Ready,
                 Some(hls_path),
-            )
-            .await
-            .unwrap();
+            ).await {
+                tracing::error!("Failed to set Ready status for {}: {}", video_id, e);
+            }
         }
         Err(e) => {
-            // ffmpeg failed, update status to Failed
-            println!("❌ Transcoding failed: {}", e);
+            tracing::error!("Transcoding failed for {}: {}", video_id, e);
 
-            db::videos::update_status(pool, video_id, VideoStatus::Failed, None)
-                .await
-                .unwrap();
+            if let Err(e) = db::videos::update_status(
+                pool,
+                video_id,
+                VideoStatus::Failed,
+                None,
+            ).await {
+                tracing::error!("Failed to set Failed status for {}: {}", video_id, e);
+            }
         }
     }
 }
 
+/// Invokes ffmpeg to convert input file to HLS format.
+/// Uses stream copy (no re-encoding) for maximum speed.
 async fn transcode(input_path: &str, output_dir: &str) -> Result<()> {
-    // create output folder if it doesnt exist
     fs::create_dir_all(output_dir).await?;
 
     let output_path = format!("{}/index.m3u8", output_dir);
 
-    // run ffmpeg
     let status = Command::new("ffmpeg")
         .arg("-loglevel").arg("error")
         .args([
-            "-i", input_path,       // input file
-            "-codec:", "copy",      // copy video/audio as-is (fast, no re-encoding)
-            "-start_number", "0",   // start chunk numbering from 0
-            "-hls_time", "10",      // each chunk is 10 seconds
-            "-hls_list_size", "0",  // keep all chunks in manifest
-            "-f", "hls",            // output format is HLS
-            &output_path,           // where to write index.m3u8
+            "-i", input_path,
+            "-codec:", "copy",      // copy streams without re-encoding (fast)
+            "-start_number", "0",
+            "-hls_time", "10",      // 10 second chunks
+            "-hls_list_size", "0",  // include all chunks in manifest
+            "-f", "hls",
+            &output_path,
         ])
         .status()
         .await?;

@@ -1,8 +1,8 @@
 use axum::{
     extract::{Path, State},
-    Json,
-    response::IntoResponse,
     http::StatusCode,
+    response::IntoResponse,
+    Json,
 };
 use serde::Serialize;
 use crate::AppState;
@@ -14,36 +14,56 @@ pub struct VideoResponse {
     pub manifest_url: Option<String>,
 }
 
-// GET /v/:slug
-// called when someone opens the share link
+#[derive(Serialize)]
+pub struct ErrorResponse {
+    pub error: String,
+}
+
+/// GET /v/:slug
+/// Returns video status and manifest URL for the player.
+/// Called when a user opens a share link.
 pub async fn get_video(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Json<VideoResponse> {
+) -> impl IntoResponse {
 
-    let video = db::videos::get_by_slug(&state.db, &slug)
-        .await
-        .unwrap();
+    match db::videos::get_by_slug(&state.db, &slug).await {
+        Ok(video) => Json(VideoResponse {
+            status: video.status.to_string(),
+            manifest_url: video.hls_path
+                .map(|p| state.storage.public_url(&p)),
+        }).into_response(),
 
-    Json(VideoResponse {
-        status: format!("{:?}", video.status),
-        manifest_url: video.hls_path
-            .map(|p| state.storage.public_url(&p)),
-    })
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("Video not found: {}", slug) }),
+        ).into_response(),
+    }
 }
 
-// GET /videos/:slug/*file
-// serves the actual .ts and .m3u8 files to the browser
+/// GET /videos/:slug/*file
+/// Serves HLS chunks (.ts) and manifest (.m3u8) files to the browser.
+/// Called automatically by hls.js as it plays the video.
 pub async fn serve_file(
+    State(state): State<AppState>,
     Path((slug, file)): Path<(String, String)>,
 ) -> impl IntoResponse {
 
-    let file_path = format!("./storage/videos/{}/{}", slug, file);
+    // security: prevent path traversal attacks
+    // e.g. reject "../../etc/passwd"
+    if file.contains("..") || file.starts_with('/') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "Invalid file path".to_string() }),
+        ).into_response();
+    }
 
-    // read file from disk
+    // build file path using storage backend
+    let base_dir = state.storage.hls_output_path(&slug);
+    let file_path = format!("{}/{}", base_dir, file);
+
     match tokio::fs::read(&file_path).await {
         Ok(contents) => {
-            // figure out content type
             let content_type = if file.ends_with(".m3u8") {
                 "application/vnd.apple.mpegurl"
             } else if file.ends_with(".ts") {
@@ -58,8 +78,10 @@ pub async fn serve_file(
                 contents,
             ).into_response()
         }
-        Err(_) => {
-            (StatusCode::NOT_FOUND, "File not found").into_response()
-        }
+
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("File not found: {}", file) }),
+        ).into_response(),
     }
 }
