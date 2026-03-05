@@ -61,6 +61,7 @@ async fn main() {
         .route("/api/videos/:id/status", get(routes::videos::status))
         .route("/v/:slug", get(routes::stream::get_video))
         .route("/videos/:slug/*file", get(routes::stream::serve_file))
+        .route("/health", get(routes::health::health_check))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(CorsLayer::permissive()) // TODO: restrict to frontend URL in production
         .with_state(state);
